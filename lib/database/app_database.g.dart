@@ -214,6 +214,182 @@ class MesasCompanion extends UpdateCompanion<Mesa> {
   }
 }
 
+class $MeserosTable extends Meseros with TableInfo<$MeserosTable, Mesero> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $MeserosTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+      'id', aliasedName, false,
+      hasAutoIncrement: true,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('PRIMARY KEY AUTOINCREMENT'));
+  static const VerificationMeta _nombreMeta = const VerificationMeta('nombre');
+  @override
+  late final GeneratedColumn<String> nombre = GeneratedColumn<String>(
+      'nombre', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  @override
+  List<GeneratedColumn> get $columns => [id, nombre];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'meseros';
+  @override
+  VerificationContext validateIntegrity(Insertable<Mesero> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('nombre')) {
+      context.handle(_nombreMeta,
+          nombre.isAcceptableOrUnknown(data['nombre']!, _nombreMeta));
+    } else if (isInserting) {
+      context.missing(_nombreMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  Mesero map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return Mesero(
+      id: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}id'])!,
+      nombre: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}nombre'])!,
+    );
+  }
+
+  @override
+  $MeserosTable createAlias(String alias) {
+    return $MeserosTable(attachedDatabase, alias);
+  }
+}
+
+class Mesero extends DataClass implements Insertable<Mesero> {
+  final int id;
+  final String nombre;
+  const Mesero({required this.id, required this.nombre});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['nombre'] = Variable<String>(nombre);
+    return map;
+  }
+
+  MeserosCompanion toCompanion(bool nullToAbsent) {
+    return MeserosCompanion(
+      id: Value(id),
+      nombre: Value(nombre),
+    );
+  }
+
+  factory Mesero.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return Mesero(
+      id: serializer.fromJson<int>(json['id']),
+      nombre: serializer.fromJson<String>(json['nombre']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'nombre': serializer.toJson<String>(nombre),
+    };
+  }
+
+  Mesero copyWith({int? id, String? nombre}) => Mesero(
+        id: id ?? this.id,
+        nombre: nombre ?? this.nombre,
+      );
+  Mesero copyWithCompanion(MeserosCompanion data) {
+    return Mesero(
+      id: data.id.present ? data.id.value : this.id,
+      nombre: data.nombre.present ? data.nombre.value : this.nombre,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('Mesero(')
+          ..write('id: $id, ')
+          ..write('nombre: $nombre')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(id, nombre);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is Mesero && other.id == this.id && other.nombre == this.nombre);
+}
+
+class MeserosCompanion extends UpdateCompanion<Mesero> {
+  final Value<int> id;
+  final Value<String> nombre;
+  const MeserosCompanion({
+    this.id = const Value.absent(),
+    this.nombre = const Value.absent(),
+  });
+  MeserosCompanion.insert({
+    this.id = const Value.absent(),
+    required String nombre,
+  }) : nombre = Value(nombre);
+  static Insertable<Mesero> custom({
+    Expression<int>? id,
+    Expression<String>? nombre,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (nombre != null) 'nombre': nombre,
+    });
+  }
+
+  MeserosCompanion copyWith({Value<int>? id, Value<String>? nombre}) {
+    return MeserosCompanion(
+      id: id ?? this.id,
+      nombre: nombre ?? this.nombre,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (nombre.present) {
+      map['nombre'] = Variable<String>(nombre.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MeserosCompanion(')
+          ..write('id: $id, ')
+          ..write('nombre: $nombre')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $PedidosTable extends Pedidos with TableInfo<$PedidosTable, Pedido> {
   @override
   final GeneratedDatabase attachedDatabase;
@@ -2413,6 +2589,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
   late final $MesasTable mesas = $MesasTable(this);
+  late final $MeserosTable meseros = $MeserosTable(this);
   late final $PedidosTable pedidos = $PedidosTable(this);
   late final $ItemsPedidoTable itemsPedido = $ItemsPedidoTable(this);
   late final $CategoriasTable categorias = $CategoriasTable(this);
@@ -2426,6 +2603,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   @override
   List<DatabaseSchemaEntity> get allSchemaEntities => [
         mesas,
+        meseros,
         pedidos,
         itemsPedido,
         categorias,
@@ -2647,6 +2825,120 @@ typedef $$MesasTableProcessedTableManager = ProcessedTableManager<
     (Mesa, $$MesasTableReferences),
     Mesa,
     PrefetchHooks Function({bool pedidosRefs})>;
+typedef $$MeserosTableCreateCompanionBuilder = MeserosCompanion Function({
+  Value<int> id,
+  required String nombre,
+});
+typedef $$MeserosTableUpdateCompanionBuilder = MeserosCompanion Function({
+  Value<int> id,
+  Value<String> nombre,
+});
+
+class $$MeserosTableFilterComposer
+    extends Composer<_$AppDatabase, $MeserosTable> {
+  $$MeserosTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+      column: $table.id, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get nombre => $composableBuilder(
+      column: $table.nombre, builder: (column) => ColumnFilters(column));
+}
+
+class $$MeserosTableOrderingComposer
+    extends Composer<_$AppDatabase, $MeserosTable> {
+  $$MeserosTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+      column: $table.id, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get nombre => $composableBuilder(
+      column: $table.nombre, builder: (column) => ColumnOrderings(column));
+}
+
+class $$MeserosTableAnnotationComposer
+    extends Composer<_$AppDatabase, $MeserosTable> {
+  $$MeserosTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get nombre =>
+      $composableBuilder(column: $table.nombre, builder: (column) => column);
+}
+
+class $$MeserosTableTableManager extends RootTableManager<
+    _$AppDatabase,
+    $MeserosTable,
+    Mesero,
+    $$MeserosTableFilterComposer,
+    $$MeserosTableOrderingComposer,
+    $$MeserosTableAnnotationComposer,
+    $$MeserosTableCreateCompanionBuilder,
+    $$MeserosTableUpdateCompanionBuilder,
+    (Mesero, BaseReferences<_$AppDatabase, $MeserosTable, Mesero>),
+    Mesero,
+    PrefetchHooks Function()> {
+  $$MeserosTableTableManager(_$AppDatabase db, $MeserosTable table)
+      : super(TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$MeserosTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$MeserosTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$MeserosTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<int> id = const Value.absent(),
+            Value<String> nombre = const Value.absent(),
+          }) =>
+              MeserosCompanion(
+            id: id,
+            nombre: nombre,
+          ),
+          createCompanionCallback: ({
+            Value<int> id = const Value.absent(),
+            required String nombre,
+          }) =>
+              MeserosCompanion.insert(
+            id: id,
+            nombre: nombre,
+          ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ));
+}
+
+typedef $$MeserosTableProcessedTableManager = ProcessedTableManager<
+    _$AppDatabase,
+    $MeserosTable,
+    Mesero,
+    $$MeserosTableFilterComposer,
+    $$MeserosTableOrderingComposer,
+    $$MeserosTableAnnotationComposer,
+    $$MeserosTableCreateCompanionBuilder,
+    $$MeserosTableUpdateCompanionBuilder,
+    (Mesero, BaseReferences<_$AppDatabase, $MeserosTable, Mesero>),
+    Mesero,
+    PrefetchHooks Function()>;
 typedef $$PedidosTableCreateCompanionBuilder = PedidosCompanion Function({
   Value<int> id,
   Value<int?> mesaId,
@@ -4306,6 +4598,8 @@ class $AppDatabaseManager {
   $AppDatabaseManager(this._db);
   $$MesasTableTableManager get mesas =>
       $$MesasTableTableManager(_db, _db.mesas);
+  $$MeserosTableTableManager get meseros =>
+      $$MeserosTableTableManager(_db, _db.meseros);
   $$PedidosTableTableManager get pedidos =>
       $$PedidosTableTableManager(_db, _db.pedidos);
   $$ItemsPedidoTableTableManager get itemsPedido =>

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:drift/drift.dart' show Variable;
+import 'package:drift/drift.dart' show OrderingTerm, Variable;
 import '../../../../core/constants/app_colors.dart';
 import '../../../../core/constants/app_strings.dart';
 import '../../../../core/utils/money_formatter.dart';
@@ -232,6 +232,16 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
     return row?.valor ?? fallback;
   }
 
+  Future<List<String>> _meserosConfigurados() async {
+    final meseros = await (_db.select(_db.meseros)
+          ..orderBy([(m) => OrderingTerm(expression: m.nombre)]))
+        .get();
+    return meseros
+        .map((m) => m.nombre.trim())
+        .where((m) => m.isNotEmpty)
+        .toList();
+  }
+
   Future<List<String>> _impresorasConfiguradas() async {
     final raw = await _leerConfig('printer_devices', fallback: 'POS principal');
     return raw
@@ -397,7 +407,8 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
     String tipo = 'mesa';
     final referenciaCtrl = TextEditingController();
     final clienteCtrl = TextEditingController();
-    final meseroCtrl = TextEditingController();
+    final meseros = await _meserosConfigurados();
+    String meseroSeleccionado = '';
 
     final confirmar = await showDialog<bool>(
       context: context,
@@ -435,11 +446,29 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
                   ),
                 ),
                 const SizedBox(height: 10),
-                TextField(
-                  controller: meseroCtrl,
-                  decoration: const InputDecoration(
+                DropdownButtonFormField<String>(
+                  initialValue: meseroSeleccionado,
+                  decoration: InputDecoration(
                     labelText: 'Mesero (opcional)',
+                    helperText: meseros.isEmpty
+                        ? 'Crea meseros en Configuracion para verlos aqui.'
+                        : null,
                   ),
+                  items: [
+                    const DropdownMenuItem(
+                      value: '',
+                      child: Text('Sin mesero'),
+                    ),
+                    ...meseros.map(
+                      (mesero) => DropdownMenuItem(
+                        value: mesero,
+                        child: Text(mesero),
+                      ),
+                    ),
+                  ],
+                  onChanged: (value) {
+                    setLocalState(() => meseroSeleccionado = value ?? '');
+                  },
                 ),
               ],
             ),
@@ -477,7 +506,7 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
         jornada.id,
         referenciaCtrl.text.trim(),
         clienteCtrl.text.trim(),
-        meseroCtrl.text.trim(),
+        meseroSeleccionado.trim(),
       ],
     );
 

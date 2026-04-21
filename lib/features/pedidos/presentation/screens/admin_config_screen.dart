@@ -12,6 +12,7 @@ import '../../../../database/app_database.dart';
 import '../../../../injection_container.dart';
 import 'config_categorias_screen.dart';
 import 'config_impresoras_screen.dart';
+import 'config_meseros_screen.dart';
 import 'config_productos_screen.dart';
 
 class AdminConfigScreen extends StatefulWidget {
@@ -309,6 +310,21 @@ class _AdminConfigScreenState extends State<AdminConfigScreen> {
                       context,
                       MaterialPageRoute(
                         builder: (_) => const ConfigImpresorasScreen(),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.people_alt_outlined),
+                    title: const Text('Administrar meseros'),
+                    subtitle: const Text('Crear, editar y eliminar meseros'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const ConfigMeserosScreen(),
                       ),
                     ),
                   ),

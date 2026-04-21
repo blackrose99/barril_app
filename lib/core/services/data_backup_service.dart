@@ -29,18 +29,20 @@ class DataBackupService {
     final productos = await _db.select(_db.productos).get();
     final adicionales = await _db.select(_db.adicionales).get();
     final mesas = await _db.select(_db.mesas).get();
+    final meseros = await _db.select(_db.meseros).get();
     final pedidos = await _db.select(_db.pedidos).get();
     final itemsPedido = await _db.select(_db.itemsPedido).get();
     final facturas = await _db.select(_db.facturas).get();
     final configuracion = await _db.select(_db.configuracion).get();
 
     return {
-      'version': 1,
+      'version': 2,
       'exportedAt': DateTime.now().toIso8601String(),
       'categorias': categorias.map((row) => row.toJson()).toList(),
       'productos': productos.map((row) => row.toJson()).toList(),
       'adicionales': adicionales.map((row) => row.toJson()).toList(),
       'mesas': mesas.map((row) => row.toJson()).toList(),
+      'meseros': meseros.map((row) => row.toJson()).toList(),
       'pedidos': pedidos.map((row) => row.toJson()).toList(),
       'itemsPedido': itemsPedido.map((row) => row.toJson()).toList(),
       'facturas': facturas.map((row) => row.toJson()).toList(),
@@ -66,6 +68,9 @@ class DataBackupService {
     final mesas = _readList(decoded, 'mesas')
         .map((e) => Mesa.fromJson(_readMap(e)))
         .toList();
+    final meseros = _readList(decoded, 'meseros')
+        .map((e) => Mesero.fromJson(_readMap(e)))
+        .toList();
     final pedidos = _readList(decoded, 'pedidos')
         .map((e) => Pedido.fromJson(_readMap(e)))
         .toList();
@@ -87,6 +92,7 @@ class DataBackupService {
         batch.deleteAll(_db.productos);
         batch.deleteAll(_db.adicionales);
         batch.deleteAll(_db.mesas);
+        batch.deleteAll(_db.meseros);
         batch.deleteAll(_db.categorias);
         batch.deleteAll(_db.configuracion);
       });
@@ -95,6 +101,7 @@ class DataBackupService {
         batch.insertAll(_db.categorias, categorias);
         batch.insertAll(_db.adicionales, adicionales);
         batch.insertAll(_db.mesas, mesas);
+        batch.insertAll(_db.meseros, meseros);
         batch.insertAll(_db.configuracion, configuracion);
         batch.insertAll(_db.productos, productos);
         batch.insertAll(_db.pedidos, pedidos);
