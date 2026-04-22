@@ -367,20 +367,32 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
 
   Future<void> _cerrarJornada(_JornadaResumen jornada) async {
     final abiertos = await _db.customSelect(
-      "SELECT COUNT(*) AS total FROM pedidos WHERE jornada_id = ? AND estado = 'abierto'",
+      '''
+      SELECT p.id AS id,
+             COALESCE(SUM(i.precio * i.cantidad), 0) +
+             CASE WHEN p.tipo = 'domicilio' THEN COALESCE(p.valor_domicilio, 0)
+                  ELSE 0 END AS total
+      FROM pedidos p
+      LEFT JOIN items_pedido i ON i.pedido_id = p.id
+      WHERE p.jornada_id = ? AND p.estado = 'abierto'
+      GROUP BY p.id, p.tipo, p.valor_domicilio
+      ''',
       variables: [Variable<int>(jornada.id)],
-    ).getSingle();
+    ).get();
 
-    final totalAbiertos = (abiertos.data['total'] as int?) ?? 0;
+    final abiertosConTotal = abiertos.where((row) {
+      final total = (row.data['total'] as num?)?.toDouble() ?? 0;
+      return total > 0.0001;
+    }).toList();
 
-    if (totalAbiertos > 0) {
+    if (abiertosConTotal.isNotEmpty) {
       if (!mounted) return;
       showDialog<void>(
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('No se puede cerrar jornada'),
           content: Text(
-            'Hay $totalAbiertos pedido(s) abiertos. Cierra o cancela esos pedidos antes de cerrar la jornada.',
+            'Hay ${abiertosConTotal.length} pedido(s) abiertos con total mayor a 0. Cierra o cancela esos pedidos antes de cerrar la jornada.',
           ),
           actions: [
             ElevatedButton(
@@ -393,10 +405,29 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
       return;
     }
 
+    if (abiertos.isNotEmpty) {
+      await _db.customStatement(
+        "UPDATE pedidos SET estado = 'cancelado', cerrado_en = ? WHERE jornada_id = ? AND estado = 'abierto'",
+        [_nowEpochMs(), jornada.id],
+      );
+    }
+
     await _db.customStatement(
       "UPDATE jornadas SET estado = 'cerrada', cerrada_en = ? WHERE id = ?",
       [_nowLocalSql(), jornada.id],
     );
+
+    if (!mounted) return;
+    if (abiertos.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Jornada cerrada. ${abiertos.length} pedido(s) abierto(s) con total 0 fueron marcados como cancelados.',
+          ),
+        ),
+      );
+    }
+
     await _cargarDatos();
   }
 
@@ -409,6 +440,8 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
     final clienteCtrl = TextEditingController();
     final meseros = await _meserosConfigurados();
     String meseroSeleccionado = '';
+
+    if (!mounted) return;
 
     final confirmar = await showDialog<bool>(
       context: context,
@@ -510,6 +543,120 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
       ],
     );
 
+    await _cargarDatos();
+  }
+
+  Future<void> _editarPedidoAbierto(_PedidoResumen pedido) async {
+    if (pedido.estado != 'abierto') return;
+
+    final referenciaCtrl = TextEditingController(text: pedido.referencia);
+    final clienteCtrl = TextEditingController(text: pedido.cliente);
+    final meseros = await _meserosConfigurados();
+    String meseroSeleccionado = pedido.mesero;
+
+    if (!mounted) return;
+
+    if (meseroSeleccionado.isNotEmpty &&
+        !meseros.contains(meseroSeleccionado)) {
+      meseroSeleccionado = '';
+    }
+
+    final confirmar = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setLocalState) => AlertDialog(
+          title: Text('Editar pedido #${pedido.id}'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: referenciaCtrl,
+                  decoration: InputDecoration(
+                    labelText: pedido.tipo == 'mesa'
+                        ? 'Mesa o referencia'
+                        : 'Direccion o referencia',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: clienteCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Cliente (opcional)',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  initialValue: meseroSeleccionado,
+                  decoration: InputDecoration(
+                    labelText: 'Mesero (opcional)',
+                    helperText: meseros.isEmpty
+                        ? 'Crea meseros en Configuracion para verlos aqui.'
+                        : null,
+                  ),
+                  items: [
+                    const DropdownMenuItem(
+                      value: '',
+                      child: Text('Sin mesero'),
+                    ),
+                    ...meseros.map(
+                      (mesero) => DropdownMenuItem(
+                        value: mesero,
+                        child: Text(mesero),
+                      ),
+                    ),
+                  ],
+                  onChanged: (value) {
+                    setLocalState(() => meseroSeleccionado = value ?? '');
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancelar'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Guardar cambios'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (confirmar != true) return;
+
+    final totalActualizados = await _db.customUpdate(
+      "UPDATE pedidos SET referencia = ?, cliente = ?, mesero = ? WHERE id = ? AND estado = 'abierto'",
+      variables: [
+        Variable<String>(referenciaCtrl.text.trim()),
+        Variable<String>(clienteCtrl.text.trim()),
+        Variable<String>(meseroSeleccionado.trim()),
+        Variable<int>(pedido.id),
+      ],
+      updates: {_db.pedidos},
+    );
+
+    if (!mounted) return;
+
+    if (totalActualizados == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No se pudo editar el pedido porque ya no esta abierto.',
+          ),
+        ),
+      );
+      await _cargarDatos();
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Pedido actualizado correctamente.')),
+    );
     await _cargarDatos();
   }
 
@@ -878,6 +1025,13 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
                                                 Wrap(
                                                   spacing: 8,
                                                   children: [
+                                                    OutlinedButton(
+                                                      onPressed: () =>
+                                                          _editarPedidoAbierto(
+                                                              pedido),
+                                                      child: const Text(
+                                                          'Editar datos'),
+                                                    ),
                                                     OutlinedButton(
                                                       onPressed: () =>
                                                           Navigator.push(

@@ -1,11 +1,11 @@
 {
-    "name": "barril_app",
-    "short_name": "barril_app",
+    "name": "POSify",
+    "short_name": "POSify",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#E8F5E9",
+    "theme_color": "#1E9E4A",
+    "description": "POSify - inventarios y ventas.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

@@ -1,10 +1,14 @@
 import 'dart:io';
 import 'dart:convert';
 
+import 'package:csv/csv.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:intl/intl.dart';
+import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
+import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../../../core/constants/app_colors.dart';
@@ -36,6 +40,72 @@ class _JornadaHistorialScreenState extends State<JornadaHistorialScreen> {
   String _query = '';
   List<_PedidoHistorial> _pedidos = const [];
   _ResumenVentas _resumen = const _ResumenVentas();
+
+  Future<String> _leerConfig(String clave, {String fallback = ''}) async {
+    final row = await (_db.select(_db.configuracion)
+          ..where((c) => c.clave.equals(clave)))
+        .getSingleOrNull();
+    return row?.valor ?? fallback;
+  }
+
+  bool _mismoNombreImpresora(String a, String b) {
+    return a.trim().toLowerCase() == b.trim().toLowerCase();
+  }
+
+  Future<bool> _imprimirDirectoBluetooth(String contenido) async {
+    try {
+      final configurada = await _leerConfig('printer_default');
+      if (configurada.trim().isEmpty) return false;
+
+      final conectados = FlutterBluePlus.connectedDevices;
+      if (conectados.isEmpty) return false;
+
+      BluetoothDevice? objetivo;
+      for (final d in conectados) {
+        if (_mismoNombreImpresora(d.platformName, configurada)) {
+          objetivo = d;
+          break;
+        }
+      }
+      if (objetivo == null) return false;
+
+      final servicios = await objetivo.discoverServices();
+
+      BluetoothCharacteristic? writable;
+      for (final s in servicios) {
+        for (final c in s.characteristics) {
+          if (c.properties.write || c.properties.writeWithoutResponse) {
+            writable = c;
+            break;
+          }
+        }
+        if (writable != null) break;
+      }
+
+      if (writable == null) return false;
+
+      final bytes = <int>[
+        ...utf8.encode('$contenido\n\n'),
+        0x1D,
+        0x56,
+        0x00,
+      ];
+
+      const int maxChunk = 180;
+      for (int i = 0; i < bytes.length; i += maxChunk) {
+        final end = (i + maxChunk < bytes.length) ? i + maxChunk : bytes.length;
+        final chunk = bytes.sublist(i, end);
+        await writable.write(
+          chunk,
+          withoutResponse: writable.properties.writeWithoutResponse,
+        );
+      }
+
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
 
   @override
   void initState() {
@@ -119,7 +189,7 @@ class _JornadaHistorialScreenState extends State<JornadaHistorialScreen> {
     });
   }
 
-  Future<void> _descargarInformePos() async {
+  Future<String> _construirInformePosTexto() async {
     final filas = await _db.customSelect(
       '''
       SELECT i.nombre_producto AS producto,
@@ -246,17 +316,109 @@ class _JornadaHistorialScreenState extends State<JornadaHistorialScreen> {
       }
     }
 
+    return buffer.toString();
+  }
+
+  Future<void> _descargarInformePos() async {
+    final contenido = await _construirInformePosTexto();
+
     final dir = await getTemporaryDirectory();
     final safeName =
         widget.jornadaNombre.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
     final path = '${dir.path}/informe_pos_${safeName}_${widget.jornadaId}.txt';
     final file = File(path);
-    await file.writeAsString(buffer.toString());
+    await file.writeAsString(contenido);
 
     if (!mounted) return;
     await Share.shareXFiles(
       [XFile(file.path)],
       text: 'Informe POS de ${widget.jornadaNombre}',
+    );
+  }
+
+  Future<void> _descargarInformeCsv() async {
+    final filas = <List<dynamic>>[
+      [
+        'jornada_id',
+        'jornada_nombre',
+        'pedido_id',
+        'estado',
+        'tipo',
+        'referencia',
+        'cliente',
+        'mesero',
+        'items',
+        'subtotal',
+        'domicilio',
+        'total',
+      ],
+    ];
+
+    for (final p in _pedidos) {
+      filas.add([
+        widget.jornadaId,
+        widget.jornadaNombre,
+        p.id,
+        p.estado,
+        p.tipo,
+        p.referencia,
+        p.cliente,
+        p.mesero,
+        p.itemsCount,
+        p.subtotal.toStringAsFixed(2),
+        p.domicilio.toStringAsFixed(2),
+        p.total.toStringAsFixed(2),
+      ]);
+    }
+
+    final contenido = const ListToCsvConverter().convert(filas);
+    final dir = await getTemporaryDirectory();
+    final safeName =
+        widget.jornadaNombre.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+    final path = '${dir.path}/informe_pos_${safeName}_${widget.jornadaId}.csv';
+    final file = File(path);
+    await file.writeAsString(contenido);
+
+    if (!mounted) return;
+    await Share.shareXFiles(
+      [XFile(file.path)],
+      text: 'Informe CSV (compatible con Excel) de ${widget.jornadaNombre}',
+    );
+  }
+
+  Future<void> _imprimirInformePos() async {
+    final contenido = await _construirInformePosTexto();
+
+    final impresoBluetooth = await _imprimirDirectoBluetooth(contenido);
+    if (impresoBluetooth) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content:
+              Text('Informe enviado por Bluetooth a la impresora conectada.'),
+        ),
+      );
+      return;
+    }
+
+    await Printing.layoutPdf(
+      onLayout: (format) async {
+        final doc = pw.Document();
+        doc.addPage(
+          pw.MultiPage(
+            build: (context) => [
+              pw.Text(
+                contenido,
+                style: pw.TextStyle(
+                  font: pw.Font.courier(),
+                  fontSize: 10,
+                ),
+              ),
+            ],
+          ),
+        );
+        return doc.save();
+      },
     );
   }
 
@@ -282,10 +444,36 @@ class _JornadaHistorialScreenState extends State<JornadaHistorialScreen> {
           style: const TextStyle(color: Colors.white),
         ),
         actions: [
-          IconButton(
-            tooltip: 'Descargar informe POS',
-            onPressed: _descargarInformePos,
-            icon: const Icon(Icons.download_outlined, color: Colors.white),
+          PopupMenuButton<String>(
+            tooltip: 'Opciones de informe',
+            icon: const Icon(Icons.more_vert, color: Colors.white),
+            onSelected: (value) {
+              switch (value) {
+                case 'imprimir':
+                  _imprimirInformePos();
+                  break;
+                case 'csv':
+                  _descargarInformeCsv();
+                  break;
+                case 'txt':
+                  _descargarInformePos();
+                  break;
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem<String>(
+                value: 'imprimir',
+                child: Text('Imprimir informe'),
+              ),
+              PopupMenuItem<String>(
+                value: 'csv',
+                child: Text('Descargar CSV (Excel)'),
+              ),
+              PopupMenuItem<String>(
+                value: 'txt',
+                child: Text('Descargar TXT'),
+              ),
+            ],
           ),
         ],
       ),
