@@ -7,11 +7,15 @@ import '../../../../core/constants/app_colors.dart';
 import '../../../../core/utils/money_formatter.dart';
 import '../../../../database/app_database.dart' as dbi;
 import '../../../../injection_container.dart';
+import '../../../impresion/ticket_data.dart';
 import '../../../productos/domain/entities/producto.dart';
 import '../../../productos/presentation/providers/productos_provider.dart';
 import '../../domain/entities/item_pedido.dart';
 import '../widgets/adicionales_chips.dart';
 import '../widgets/cantidad_selector.dart';
+import 'ticket_preview_screen.dart';
+
+const double _anchoBreakpointEscritorio = 900;
 
 String _formatMoney(num value) {
   return formatMoney(value);
@@ -35,43 +39,17 @@ class PedidoScreen extends ConsumerStatefulWidget {
 
 class _PedidoScreenState extends ConsumerState<PedidoScreen> {
   bool _cargando = true;
-  bool _mostrarFactura = false;
-  bool _mostrarSelectorProductos = true;
   int? _pedidoId;
+  int _numeroTurno = 0;
+  String _estadoPedido = 'abierto';
+  String _referencia = '';
+  String _cliente = '';
+  String _mesero = '';
   final dbi.AppDatabase _db = sl<dbi.AppDatabase>();
   final List<ItemPedido> _items = [];
   bool _esDomicilio = false;
   bool _cobrarDomicilio = false;
   double _valorDomicilioConfig = 5000;
-
-  void _toggleFacturaPanel() {
-    setState(() {
-      if (_mostrarFactura) {
-        _mostrarFactura = false;
-      } else {
-        _mostrarFactura = true;
-        _mostrarSelectorProductos = false;
-      }
-    });
-  }
-
-  void _toggleProductosPanel() {
-    setState(() {
-      if (_mostrarSelectorProductos) {
-        _mostrarSelectorProductos = false;
-      } else {
-        _mostrarSelectorProductos = true;
-        _mostrarFactura = false;
-      }
-    });
-  }
-
-  void _activarBusquedaProductos() {
-    setState(() {
-      _mostrarSelectorProductos = true;
-      _mostrarFactura = false;
-    });
-  }
 
   int _nowEpochMs() => DateTime.now().millisecondsSinceEpoch;
 
@@ -160,7 +138,8 @@ class _PedidoScreenState extends ConsumerState<PedidoScreen> {
 
     final pedidoRow = await _db.customSelect(
       '''
-      SELECT tipo, valor_domicilio
+      SELECT tipo, valor_domicilio, estado, referencia, cliente, mesero,
+             COALESCE(numero_turno, 0) AS numero_turno
       FROM pedidos
       WHERE id = ?
       LIMIT 1
@@ -187,6 +166,11 @@ class _PedidoScreenState extends ConsumerState<PedidoScreen> {
       _esDomicilio = (pedidoData['tipo'] as String?) == 'domicilio';
       _cobrarDomicilio =
           _esDomicilio && ((pedidoData['valor_domicilio'] as num?) ?? 0) > 0;
+      _estadoPedido = (pedidoData['estado'] as String?) ?? 'abierto';
+      _referencia = ((pedidoData['referencia'] as String?) ?? '').trim();
+      _cliente = ((pedidoData['cliente'] as String?) ?? '').trim();
+      _mesero = ((pedidoData['mesero'] as String?) ?? '').trim();
+      _numeroTurno = (pedidoData['numero_turno'] as int?) ?? 0;
       _items
         ..clear()
         ..addAll(
@@ -249,21 +233,40 @@ class _PedidoScreenState extends ConsumerState<PedidoScreen> {
     return row?.valor ?? fallback;
   }
 
-  Future<List<String>> _impresorasConfiguradas() async {
-    final raw = await _leerConfig('printer_devices', fallback: 'POS principal');
-    return raw
-        .split(',')
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty)
-        .toList();
-  }
-
   Future<void> _actualizarEstadoPedido(String estado) async {
     if (_pedidoId == null) return;
     final cerradoEn = estado == 'abierto' ? null : _nowEpochMs();
     await _db.customStatement(
       'UPDATE pedidos SET estado = ?, cerrado_en = ? WHERE id = ?',
       [estado, cerradoEn, _pedidoId!],
+    );
+    setState(() => _estadoPedido = estado);
+  }
+
+  Future<TicketData> _construirTicketData({required String estado}) async {
+    final nombreNegocio = await _leerConfig('nombre_negocio', fallback: 'POSify');
+    return TicketData(
+      nombreNegocio: nombreNegocio,
+      pedidoId: _pedidoId ?? widget.pedidoId,
+      numeroTurno: _numeroTurno,
+      tipo: _esDomicilio ? 'domicilio' : 'mesa',
+      referencia: _referencia.isNotEmpty ? _referencia : widget.titulo,
+      cliente: _cliente,
+      mesero: _mesero,
+      items: List<ItemPedido>.from(_items),
+      valorDomicilio: _valorDomicilioConfig,
+      cobrarDomicilio: _cobrarDomicilio,
+      estadoPedido: estado,
+      fecha: DateTime.now(),
+    );
+  }
+
+  Future<void> _verTicketActual() async {
+    final data = await _construirTicketData(estado: _estadoPedido);
+    if (!mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => TicketPreviewScreen(data: data)),
     );
   }
 
@@ -278,77 +281,38 @@ class _PedidoScreenState extends ConsumerState<PedidoScreen> {
       return;
     }
 
-    final impresoras = await _impresorasConfiguradas();
-    if (!mounted) return;
-
-    if (impresoras.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content:
-              Text('No hay impresoras configuradas. Configuralas primero.'),
-        ),
-      );
-      return;
-    }
-
-    final impresoraDefault =
-        await _leerConfig('printer_default', fallback: impresoras.first);
-    String impresoraSeleccionada = impresoras.contains(impresoraDefault)
-        ? impresoraDefault
-        : impresoras.first;
-
-    if (!mounted) return;
     final confirmar = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setLocalState) => AlertDialog(
-          title: const Text('Cerrar pedido e imprimir POS'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Selecciona la impresora para imprimir el POS:'),
-              const SizedBox(height: 10),
-              DropdownButtonFormField<String>(
-                initialValue: impresoraSeleccionada,
-                items: impresoras
-                    .map((p) => DropdownMenuItem(value: p, child: Text(p)))
-                    .toList(),
-                onChanged: (value) {
-                  if (value == null) return;
-                  setLocalState(() => impresoraSeleccionada = value);
-                },
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Cancelar'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Cerrar e imprimir'),
-            ),
-          ],
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Cerrar pedido'),
+        content: const Text(
+          'Se generará la factura final con el código de turno. ¿Deseas continuar?',
         ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Cerrar pedido'),
+          ),
+        ],
       ),
     );
 
     if (confirmar != true) return;
 
-    await _db.customStatement(
-      "UPDATE configuracion SET valor = ? WHERE clave = 'printer_default'",
-      [impresoraSeleccionada],
-    );
     await _actualizarEstadoPedido('cerrado');
+    final data = await _construirTicketData(estado: 'cerrado');
 
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-          content:
-              Text('Pedido cerrado. POS enviado a $impresoraSeleccionada.')),
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => TicketPreviewScreen(data: data)),
     );
+
+    if (!mounted) return;
     Navigator.pop(context, true);
   }
 
@@ -491,8 +455,12 @@ class _PedidoScreenState extends ConsumerState<PedidoScreen> {
     );
   }
 
-  void _agregarProducto(Producto producto, int cantidad,
-      List<String> adicionales, String nota) async {
+  Future<void> _agregarProductoConDatos(
+    Producto producto,
+    int cantidad,
+    List<String> adicionales,
+    String nota,
+  ) async {
     if (_pedidoId == null) return;
 
     final adicionalesNorm = _normalizarAdicionales(adicionales);
@@ -561,7 +529,175 @@ class _PedidoScreenState extends ConsumerState<PedidoScreen> {
       adicionales: adicionalesNorm,
       nota: notaNorm,
     );
+    if (!mounted) return;
     setState(() => _items.add(item));
+  }
+
+  void _agregarRapido(Producto producto) {
+    _agregarProductoConDatos(producto, 1, const [], '');
+    ScaffoldMessenger.of(context).clearSnackBars();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('+1 ${producto.nombre}'),
+        duration: const Duration(milliseconds: 900),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: AppColors.primary,
+        width: 220,
+      ),
+    );
+  }
+
+  int _indiceSimpleEnCarrito(Producto producto) {
+    final firma = _firmaItem(
+      productoId: producto.id,
+      precio: producto.precio,
+      adicionales: const [],
+      nota: '',
+    );
+    return _items.indexWhere(
+      (item) => _firmaItem(
+            productoId: item.productoId,
+            precio: item.precio,
+            adicionales: item.adicionales,
+            nota: item.nota,
+          ) ==
+          firma,
+    );
+  }
+
+  int _cantidadSimpleEnCarrito(Producto producto) {
+    final index = _indiceSimpleEnCarrito(producto);
+    return index == -1 ? 0 : _items[index].cantidad;
+  }
+
+  Future<void> _quitarRapido(Producto producto) async {
+    final index = _indiceSimpleEnCarrito(producto);
+    if (index == -1) return;
+
+    final item = _items[index];
+    if (item.cantidad > 1) {
+      final nuevaCantidad = item.cantidad - 1;
+      await (_db.update(_db.itemsPedido)..where((i) => i.id.equals(item.id)))
+          .write(dbi.ItemsPedidoCompanion(cantidad: Value(nuevaCantidad)));
+      if (!mounted) return;
+      setState(() {
+        _items[index] = ItemPedido(
+          id: item.id,
+          pedidoId: item.pedidoId,
+          productoId: item.productoId,
+          nombreProducto: item.nombreProducto,
+          precio: item.precio,
+          cantidad: nuevaCantidad,
+          adicionales: item.adicionales,
+          nota: item.nota,
+        );
+      });
+    } else {
+      await (_db.delete(_db.itemsPedido)..where((i) => i.id.equals(item.id)))
+          .go();
+      if (!mounted) return;
+      setState(() => _items.removeAt(index));
+    }
+  }
+
+  Future<void> _personalizarYAgregar(
+    Producto producto,
+    List<String> etiquetasDisponibles,
+  ) async {
+    int cantidad = 1;
+    final seleccionados = <String>[];
+    final notaCtrl = TextEditingController();
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setLocalState) => Padding(
+          padding: EdgeInsets.fromLTRB(
+            16,
+            4,
+            16,
+            MediaQuery.of(sheetContext).viewInsets.bottom + 20,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  producto.nombre,
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _formatMoney(producto.precio),
+                  style: const TextStyle(
+                    color: AppColors.accent,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                if (etiquetasDisponibles.isNotEmpty) ...[
+                  const Text('Adicionales', style: TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 8),
+                  AdicionalesChips(
+                    adicionales: etiquetasDisponibles,
+                    seleccionados: seleccionados,
+                    onToggle: (nombre) => setLocalState(() {
+                      seleccionados.contains(nombre)
+                          ? seleccionados.remove(nombre)
+                          : seleccionados.add(nombre);
+                    }),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                TextField(
+                  controller: notaCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Nota del mesero (opcional)',
+                    hintText: 'Ej: Sin cebolla, termino 3/4, extra salsa',
+                  ),
+                  maxLines: 2,
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    CantidadSelector(
+                      cantidad: cantidad,
+                      onIncrementar: () => setLocalState(() => cantidad++),
+                      onDecrementar: () => setLocalState(() => cantidad--),
+                    ),
+                    const Spacer(),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.accent,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      onPressed: () {
+                        _agregarProductoConDatos(
+                          producto,
+                          cantidad,
+                          List<String>.from(seleccionados),
+                          notaCtrl.text.trim(),
+                        );
+                        Navigator.pop(sheetContext);
+                      },
+                      child: Text(
+                        'Agregar · ${_formatMoney(producto.precio * cantidad)}',
+                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _editarItem(ItemPedido item) async {
@@ -643,20 +779,84 @@ class _PedidoScreenState extends ConsumerState<PedidoScreen> {
     setState(() => _items.removeWhere((e) => e.id == item.id));
   }
 
+  double get _subtotal => _items.fold(0, (s, i) => s + i.subtotal);
+  double get _domicilio => _esDomicilio && _cobrarDomicilio ? _valorDomicilioConfig : 0;
+  double get _total => _subtotal + _domicilio;
+
+  void _abrirCarritoEnSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      backgroundColor: Colors.white,
+      builder: (sheetContext) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.75,
+        minChildSize: 0.4,
+        maxChildSize: 0.95,
+        builder: (context, scrollController) => StatefulBuilder(
+          builder: (context, setLocalState) => _CarritoPanel(
+            items: _items,
+            subtotal: _subtotal,
+            domicilio: _domicilio,
+            total: _total,
+            esDomicilio: _esDomicilio,
+            scrollController: scrollController,
+            onEditar: (item) async {
+              await _editarItem(item);
+              setLocalState(() {});
+            },
+            onEliminar: (item) async {
+              await _eliminarItem(item);
+              setLocalState(() {});
+            },
+            onCerrarPedido: () {
+              Navigator.pop(sheetContext);
+              _cerrarPedidoDesdeDetalle();
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final titulo = widget.titulo;
-    final separacionPaneles = _items.length <= 1 ? 4.0 : 8.0;
-
     return Scaffold(
       backgroundColor: AppColors.background,
       resizeToAvoidBottomInset: true,
       appBar: AppBar(
         backgroundColor: AppColors.primary,
         elevation: 0,
-        title: Text(titulo,
-            style: const TextStyle(
-                fontWeight: FontWeight.w700, color: Colors.white)),
+        title: Row(
+          children: [
+            if (_numeroTurno > 0) ...[
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(100),
+                ),
+                child: Text(
+                  codigoTurnoDesde(_numeroTurno),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+            ],
+            Expanded(
+              child: Text(
+                widget.titulo,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w700, color: Colors.white),
+              ),
+            ),
+          ],
+        ),
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
           PopupMenuButton<String>(
@@ -668,9 +868,15 @@ class _PedidoScreenState extends ConsumerState<PedidoScreen> {
                 _cancelarPedidoDesdeDetalle();
               } else if (value == 'domicilio') {
                 _mostrarModalDomicilio();
+              } else if (value == 'ticket') {
+                _verTicketActual();
               }
             },
             itemBuilder: (context) => const [
+              PopupMenuItem<String>(
+                value: 'ticket',
+                child: Text('Vista previa / imprimir ticket'),
+              ),
               PopupMenuItem<String>(
                 value: 'domicilio',
                 child: Text('Domicilio'),
@@ -688,87 +894,284 @@ class _PedidoScreenState extends ConsumerState<PedidoScreen> {
         ],
       ),
       body: _cargando
-          ? const Center(
-              child: CircularProgressIndicator(color: AppColors.accent))
-          : SafeArea(
-              top: false,
-              minimum: const EdgeInsets.only(bottom: 8),
-              child: Column(
-                children: [
-                  if (_mostrarFactura)
-                    Expanded(
-                      child: _FacturaPanel(
-                        expandido: true,
-                        onToggleExpandido: _toggleFacturaPanel,
-                        titulo: titulo,
-                        esDomicilio: _esDomicilio,
-                        cobrarDomicilio: _cobrarDomicilio,
-                        valorDomicilio: _valorDomicilioConfig,
-                        items: _items,
-                        onEditar: _editarItem,
-                        onEliminar: _eliminarItem,
+          ? const Center(child: CircularProgressIndicator(color: AppColors.accent))
+          : LayoutBuilder(
+              builder: (context, constraints) {
+                final esEscritorio = constraints.maxWidth >= _anchoBreakpointEscritorio;
+
+                final panelProductos = _ProductosPanel(
+                  onAgregarRapido: _agregarRapido,
+                  onQuitarRapido: _quitarRapido,
+                  cantidadEnCarrito: _cantidadSimpleEnCarrito,
+                  onPersonalizar: _personalizarYAgregar,
+                );
+
+                if (esEscritorio) {
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(flex: 3, child: panelProductos),
+                      const VerticalDivider(width: 1),
+                      SizedBox(
+                        width: 360,
+                        child: _CarritoPanel(
+                          items: _items,
+                          subtotal: _subtotal,
+                          domicilio: _domicilio,
+                          total: _total,
+                          esDomicilio: _esDomicilio,
+                          onEditar: _editarItem,
+                          onEliminar: _eliminarItem,
+                          onCerrarPedido: _cerrarPedidoDesdeDetalle,
+                        ),
                       ),
-                    )
-                  else
-                    _FacturaPanel(
-                      expandido: false,
-                      onToggleExpandido: _toggleFacturaPanel,
-                      titulo: titulo,
-                      esDomicilio: _esDomicilio,
-                      cobrarDomicilio: _cobrarDomicilio,
-                      valorDomicilio: _valorDomicilioConfig,
-                      items: _items,
-                      onEditar: _editarItem,
-                      onEliminar: _eliminarItem,
+                    ],
+                  );
+                }
+
+                return Stack(
+                  children: [
+                    Positioned.fill(
+                      bottom: 64,
+                      child: panelProductos,
                     ),
-                  SizedBox(height: separacionPaneles),
-                  if (_mostrarSelectorProductos)
-                    Expanded(
-                      child: _CuerpoProductos(
-                        expandido: true,
-                        onToggleExpandido: _toggleProductosPanel,
-                        items: _items,
-                        onAgregar: _agregarProducto,
-                        onBuscarProducto: _activarBusquedaProductos,
+                    Align(
+                      alignment: Alignment.bottomCenter,
+                      child: _BarraCarritoInferior(
+                        cantidadItems: _items.fold(0, (s, i) => s + i.cantidad),
+                        total: _total,
+                        onTap: _abrirCarritoEnSheet,
                       ),
-                    )
-                  else
-                    _CuerpoProductos(
-                      expandido: false,
-                      onToggleExpandido: _toggleProductosPanel,
-                      items: _items,
-                      onAgregar: _agregarProducto,
-                      onBuscarProducto: _activarBusquedaProductos,
                     ),
-                ],
-              ),
+                  ],
+                );
+              },
             ),
     );
   }
 }
 
-class _CuerpoProductos extends ConsumerStatefulWidget {
-  final bool expandido;
-  final VoidCallback onToggleExpandido;
-  final List<ItemPedido> items;
-  final void Function(Producto, int, List<String>, String) onAgregar;
-  final VoidCallback onBuscarProducto;
+class _BarraCarritoInferior extends StatelessWidget {
+  final int cantidadItems;
+  final double total;
+  final VoidCallback onTap;
 
-  const _CuerpoProductos({
-    required this.expandido,
-    required this.onToggleExpandido,
-    required this.items,
-    required this.onAgregar,
-    required this.onBuscarProducto,
+  const _BarraCarritoInferior({
+    required this.cantidadItems,
+    required this.total,
+    required this.onTap,
   });
 
   @override
-  ConsumerState<_CuerpoProductos> createState() => _CuerpoProductosState();
+  Widget build(BuildContext context) {
+    return SafeArea(
+      top: false,
+      child: Material(
+        color: AppColors.primary,
+        child: InkWell(
+          onTap: onTap,
+          child: Container(
+            height: 56,
+            padding: const EdgeInsets.symmetric(horizontal: 18),
+            child: Row(
+              children: [
+                const Icon(Icons.shopping_cart, color: Colors.white, size: 20),
+                const SizedBox(width: 10),
+                Text(
+                  cantidadItems == 0
+                      ? 'Carrito vacío'
+                      : '$cantidadItems producto(s) · ${_formatMoney(total)}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const Spacer(),
+                const Icon(Icons.keyboard_arrow_up, color: Colors.white),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
-class _CuerpoProductosState extends ConsumerState<_CuerpoProductos> {
+class _CarritoPanel extends StatelessWidget {
+  final List<ItemPedido> items;
+  final double subtotal;
+  final double domicilio;
+  final double total;
+  final bool esDomicilio;
+  final ScrollController? scrollController;
+  final Future<void> Function(ItemPedido item) onEditar;
+  final Future<void> Function(ItemPedido item) onEliminar;
+  final VoidCallback onCerrarPedido;
+
+  const _CarritoPanel({
+    required this.items,
+    required this.subtotal,
+    required this.domicilio,
+    required this.total,
+    required this.esDomicilio,
+    required this.onEditar,
+    required this.onEliminar,
+    required this.onCerrarPedido,
+    this.scrollController,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          child: Text(
+            'Pedido (${items.length})',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+          ),
+        ),
+        Expanded(
+          child: items.isEmpty
+              ? const Center(
+                  child: Text(
+                    'Aún no hay productos en el pedido.',
+                    style: TextStyle(color: AppColors.textMuted),
+                  ),
+                )
+              : ListView.separated(
+                  controller: scrollController,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  itemCount: items.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (_, index) {
+                    final item = items[index];
+                    return Card(
+                      elevation: 0,
+                      color: AppColors.surface,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    item.nombreProducto,
+                                    style: const TextStyle(fontWeight: FontWeight.w700),
+                                  ),
+                                  Text(
+                                    '${item.cantidad} x ${_formatMoney(item.precio)}',
+                                    style: const TextStyle(
+                                        color: AppColors.textMuted, fontSize: 12),
+                                  ),
+                                  if (item.adicionales.isNotEmpty)
+                                    Text(
+                                      '+ ${item.adicionales.join(', ')}',
+                                      style: const TextStyle(
+                                          color: AppColors.textMuted, fontSize: 12),
+                                    ),
+                                  if (item.nota.trim().isNotEmpty)
+                                    Text(
+                                      'Nota: ${item.nota.trim()}',
+                                      style: const TextStyle(
+                                          color: AppColors.textMuted,
+                                          fontSize: 12,
+                                          fontStyle: FontStyle.italic),
+                                    ),
+                                ],
+                              ),
+                            ),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Text(
+                                  _formatMoney(item.subtotal),
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w700, color: AppColors.primary),
+                                ),
+                                Row(
+                                  children: [
+                                    IconButton(
+                                      visualDensity: VisualDensity.compact,
+                                      icon: const Icon(Icons.edit_outlined, size: 18),
+                                      onPressed: () => onEditar(item),
+                                    ),
+                                    IconButton(
+                                      visualDensity: VisualDensity.compact,
+                                      icon: const Icon(Icons.delete_outline,
+                                          size: 18, color: AppColors.error),
+                                      onPressed: () => onEliminar(item),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+        Container(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+          decoration: const BoxDecoration(
+            border: Border(top: BorderSide(color: AppColors.surface, width: 2)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Text('Subtotal: ${_formatMoney(subtotal)}'),
+                  if (esDomicilio) ...[
+                    const SizedBox(width: 12),
+                    Text('Domicilio: ${_formatMoney(domicilio)}'),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 10),
+              FilledButton(
+                onPressed: items.isEmpty ? null : onCerrarPedido,
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                child: Text(
+                  'Cerrar pedido · ${_formatMoney(total)}',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ProductosPanel extends ConsumerStatefulWidget {
+  final void Function(Producto) onAgregarRapido;
+  final void Function(Producto) onQuitarRapido;
+  final int Function(Producto) cantidadEnCarrito;
+  final Future<void> Function(Producto, List<String>) onPersonalizar;
+
+  const _ProductosPanel({
+    required this.onAgregarRapido,
+    required this.onQuitarRapido,
+    required this.cantidadEnCarrito,
+    required this.onPersonalizar,
+  });
+
+  @override
+  ConsumerState<_ProductosPanel> createState() => _ProductosPanelState();
+}
+
+class _ProductosPanelState extends ConsumerState<_ProductosPanel> {
   String _query = '';
-  int? _productoExpandidoId;
   final dbi.AppDatabase _db = sl<dbi.AppDatabase>();
   Map<int, List<String>> _etiquetasPorCategoria = const {};
 
@@ -815,182 +1218,86 @@ class _CuerpoProductosState extends ConsumerState<_CuerpoProductos> {
     final categoriasAsync = ref.watch(categoriasProvider);
     final catSelec = ref.watch(categoriaSeleccionadaProvider);
 
-    if (!widget.expandido) {
-      return Container(
-        width: double.infinity,
-        margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColors.accent.withValues(alpha: 0.25)),
-        ),
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: const BoxDecoration(
-            color: AppColors.primary,
-            borderRadius: BorderRadius.only(
-              topLeft: Radius.circular(12),
-              topRight: Radius.circular(12),
-            ),
-          ),
-          child: InkWell(
-            onTap: widget.onToggleExpandido,
-            borderRadius: BorderRadius.circular(8),
-            child: const Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Productos colapsado',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                Icon(
-                  Icons.expand_more,
-                  color: Colors.white,
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    }
-
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.accent.withValues(alpha: 0.25)),
-      ),
-      child: Column(
-        children: [
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: const BoxDecoration(
-              color: AppColors.primary,
-              borderRadius: BorderRadius.only(
-                topLeft: Radius.circular(12),
-                topRight: Radius.circular(12),
-              ),
-            ),
-            child: InkWell(
-              onTap: widget.onToggleExpandido,
-              borderRadius: BorderRadius.circular(8),
-              child: Row(
-                children: [
-                  const Expanded(
-                    child: Text(
-                      'Productos',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  Icon(
-                    widget.expandido ? Icons.expand_less : Icons.expand_more,
-                    color: Colors.white,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          ...[
-            const SizedBox(height: 8),
-            // Tabs de categorías
-            categoriasAsync.when(
-              loading: () => const SizedBox(),
-              error: (e, _) => const SizedBox(),
-              data: (cats) => SizedBox(
-                height: 48,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  children: cats.map((c) {
-                    final sel = catSelec == c.id;
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: ChoiceChip(
-                        label: Text(c.nombre),
-                        selected: sel,
-                        onSelected: (_) => ref
-                            .read(categoriaSeleccionadaProvider.notifier)
-                            .state = sel ? null : c.id,
-                        selectedColor: AppColors.accent,
-                        labelStyle: TextStyle(
-                          color: sel ? Colors.white : AppColors.textPrimary,
-                          fontWeight: FontWeight.w500,
-                        ),
-                        backgroundColor: AppColors.surface,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20)),
-                        side: BorderSide.none,
-                      ),
-                    );
-                  }).toList(),
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Padding(
+    return Column(
+      children: [
+        const SizedBox(height: 8),
+        categoriasAsync.when(
+          loading: () => const SizedBox(),
+          error: (e, _) => const SizedBox(),
+          data: (cats) => SizedBox(
+            height: 44,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
-                decoration: const InputDecoration(
-                  prefixIcon: Icon(Icons.search),
-                  hintText: 'Filtrar productos por nombre',
-                ),
-                onTap: widget.onBuscarProducto,
-                onChanged: (value) {
-                  widget.onBuscarProducto();
-                  setState(() => _query = value);
-                },
-              ),
+              children: cats.map((c) {
+                final sel = catSelec == c.id;
+                return Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    label: Text(c.nombre),
+                    selected: sel,
+                    onSelected: (_) => ref
+                        .read(categoriaSeleccionadaProvider.notifier)
+                        .state = sel ? null : c.id,
+                    selectedColor: AppColors.accent,
+                    labelStyle: TextStyle(
+                      color: sel ? Colors.white : AppColors.textPrimary,
+                      fontWeight: FontWeight.w500,
+                    ),
+                    backgroundColor: AppColors.surface,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                    side: BorderSide.none,
+                  ),
+                );
+              }).toList(),
             ),
-            const SizedBox(height: 8),
-            // Lista de productos
-            Expanded(
-              child: _ProductosLista(
-                categoriaId: catSelec,
-                onAgregar: widget.onAgregar,
-                query: _query,
-                productoExpandidoId: _productoExpandidoId,
-                onCambiarExpandido: (productoId) {
-                  setState(() {
-                    _productoExpandidoId =
-                        _productoExpandidoId == productoId ? null : productoId;
-                  });
-                },
-                etiquetasPorCategoria: _etiquetasPorCategoria,
-              ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: TextField(
+            decoration: const InputDecoration(
+              prefixIcon: Icon(Icons.search),
+              hintText: 'Buscar producto y tocar para agregar',
             ),
-          ],
-        ],
-      ),
+            onChanged: (value) => setState(() => _query = value),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Expanded(
+          child: _ProductosLista(
+            categoriaId: catSelec,
+            query: _query,
+            etiquetasPorCategoria: _etiquetasPorCategoria,
+            onAgregarRapido: widget.onAgregarRapido,
+            onQuitarRapido: widget.onQuitarRapido,
+            cantidadEnCarrito: widget.cantidadEnCarrito,
+            onPersonalizar: widget.onPersonalizar,
+          ),
+        ),
+      ],
     );
   }
 }
 
 class _ProductosLista extends ConsumerWidget {
   final int? categoriaId;
-  final void Function(Producto, int, List<String>, String) onAgregar;
   final String query;
-  final int? productoExpandidoId;
-  final void Function(int productoId) onCambiarExpandido;
   final Map<int, List<String>> etiquetasPorCategoria;
+  final void Function(Producto) onAgregarRapido;
+  final void Function(Producto) onQuitarRapido;
+  final int Function(Producto) cantidadEnCarrito;
+  final Future<void> Function(Producto, List<String>) onPersonalizar;
 
   const _ProductosLista({
     required this.categoriaId,
-    required this.onAgregar,
     required this.query,
-    required this.productoExpandidoId,
-    required this.onCambiarExpandido,
     required this.etiquetasPorCategoria,
+    required this.onAgregarRapido,
+    required this.onQuitarRapido,
+    required this.cantidadEnCarrito,
+    required this.onPersonalizar,
   });
 
   @override
@@ -1000,507 +1307,166 @@ class _ProductosLista extends ConsumerWidget {
         : ref.watch(productosProvider);
 
     return productosAsync.when(
-      loading: () => const Center(
-          child: CircularProgressIndicator(color: AppColors.accent)),
+      loading: () => const Center(child: CircularProgressIndicator(color: AppColors.accent)),
       error: (e, _) => Center(child: Text('Error: $e')),
       data: (productos) {
         final q = query.trim().toLowerCase();
         final filtrados = q.isEmpty
             ? productos
-            : productos
-                .where((p) => p.nombre.toLowerCase().contains(q))
-                .toList();
+            : productos.where((p) => p.nombre.toLowerCase().contains(q)).toList();
 
-        return filtrados.isEmpty
-            ? const Center(
-                child: Text('Sin productos',
-                    style: TextStyle(color: AppColors.textMuted)))
-            : ListView.separated(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                itemCount: filtrados.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 8),
-                itemBuilder: (_, i) {
-                  final producto = filtrados[i];
-                  final expandido = productoExpandidoId == producto.id;
-                  return _ProductoTile(
-                    producto: producto,
-                    expandido: expandido,
-                    onToggleExpandido: () => onCambiarExpandido(producto.id),
-                    onAgregar: onAgregar,
-                    etiquetasPersonalizadas:
-                        etiquetasPorCategoria[producto.categoria.id] ??
-                            const [],
-                  );
-                },
-              );
+        if (filtrados.isEmpty) {
+          return const Center(
+            child: Text('Sin productos', style: TextStyle(color: AppColors.textMuted)),
+          );
+        }
+
+        return GridView.builder(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: 320,
+            mainAxisExtent: 112,
+            crossAxisSpacing: 10,
+            mainAxisSpacing: 10,
+          ),
+          itemCount: filtrados.length,
+          itemBuilder: (_, i) {
+            final producto = filtrados[i];
+            final etiquetas = etiquetasPorCategoria[producto.categoria.id] ?? const [];
+            return _ProductoTileRapido(
+              producto: producto,
+              cantidad: cantidadEnCarrito(producto),
+              onAgregarRapido: () => onAgregarRapido(producto),
+              onQuitarRapido: () => onQuitarRapido(producto),
+              onPersonalizar: () => onPersonalizar(producto, etiquetas),
+            );
+          },
+        );
       },
     );
   }
 }
 
-class _ProductoTile extends ConsumerStatefulWidget {
+class _ProductoTileRapido extends StatelessWidget {
   final Producto producto;
-  final bool expandido;
-  final VoidCallback onToggleExpandido;
-  final void Function(Producto, int, List<String>, String) onAgregar;
-  final List<String> etiquetasPersonalizadas;
+  final int cantidad;
+  final VoidCallback onAgregarRapido;
+  final VoidCallback onQuitarRapido;
+  final VoidCallback onPersonalizar;
 
-  const _ProductoTile({
+  const _ProductoTileRapido({
     required this.producto,
-    required this.expandido,
-    required this.onToggleExpandido,
-    required this.onAgregar,
-    required this.etiquetasPersonalizadas,
+    required this.cantidad,
+    required this.onAgregarRapido,
+    required this.onQuitarRapido,
+    required this.onPersonalizar,
   });
-
-  @override
-  ConsumerState<_ProductoTile> createState() => _ProductoTileState();
-}
-
-class _ProductoTileState extends ConsumerState<_ProductoTile> {
-  int _cantidad = 1;
-  List<String> _adicionales = [];
-  final TextEditingController _notaCtrl = TextEditingController();
-
-  @override
-  void didUpdateWidget(covariant _ProductoTile oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.expandido && !widget.expandido) {
-      _cantidad = 1;
-      _adicionales = [];
-      _notaCtrl.clear();
-    }
-  }
-
-  @override
-  void dispose() {
-    _notaCtrl.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 200),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: widget.expandido
-              ? AppColors.accent.withValues(alpha: 0.4)
-              : Colors.transparent,
-        ),
-      ),
-      child: Column(
-        children: [
-          // Fila principal
-          InkWell(
-            borderRadius: BorderRadius.circular(14),
-            onTap: widget.onToggleExpandido,
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(widget.producto.nombre,
-                            style: const TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.textPrimary)),
-                        if (widget.producto.descripcion.isNotEmpty)
-                          Text(widget.producto.descripcion,
-                              style: const TextStyle(
-                                  fontSize: 12, color: AppColors.textMuted)),
-                      ],
-                    ),
-                  ),
-                  Text(
-                    _formatMoney(widget.producto.precio),
-                    style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.accent),
-                  ),
-                  const SizedBox(width: 8),
-                  Icon(
-                    widget.expandido
-                        ? Icons.keyboard_arrow_up
-                        : Icons.keyboard_arrow_down,
-                    color: AppColors.textMuted,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          // Panel expandido: adicionales + cantidad + botón agregar
-          if (widget.expandido) ...[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Divider(height: 1),
-                  const SizedBox(height: 12),
-                  if (widget.etiquetasPersonalizadas.isNotEmpty)
-                    AdicionalesChips(
-                      adicionales: widget.etiquetasPersonalizadas,
-                      seleccionados: _adicionales,
-                      onToggle: (nombre) => setState(() {
-                        _adicionales.contains(nombre)
-                            ? _adicionales.remove(nombre)
-                            : _adicionales.add(nombre);
-                      }),
-                    ),
-                  if (widget.etiquetasPersonalizadas.isNotEmpty)
-                    const SizedBox(height: 14),
-                  TextField(
-                    controller: _notaCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Nota del mesero (opcional)',
-                      hintText: 'Ej: Sin cebolla, termino 3/4, extra salsa',
-                    ),
-                    maxLines: 2,
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      CantidadSelector(
-                        cantidad: _cantidad,
-                        onIncrementar: () => setState(() => _cantidad++),
-                        onDecrementar: () => setState(() => _cantidad--),
-                      ),
-                      const Spacer(),
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.accent,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 24, vertical: 12),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12)),
-                        ),
-                        onPressed: () {
-                          widget.onAgregar(widget.producto, _cantidad,
-                              _adicionales, _notaCtrl.text.trim());
-                          setState(() {
-                            _cantidad = 1;
-                            _adicionales = [];
-                            _notaCtrl.clear();
-                          });
-                          widget.onToggleExpandido();
-                        },
-                        child: const Text('Agregar',
-                            style: TextStyle(
-                                fontSize: 15, fontWeight: FontWeight.w600)),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _FacturaPanel extends StatefulWidget {
-  final bool expandido;
-  final VoidCallback onToggleExpandido;
-  final String titulo;
-  final bool esDomicilio;
-  final bool cobrarDomicilio;
-  final double valorDomicilio;
-  final List<ItemPedido> items;
-  final Future<void> Function(ItemPedido item) onEditar;
-  final Future<void> Function(ItemPedido item) onEliminar;
-
-  const _FacturaPanel({
-    required this.expandido,
-    required this.onToggleExpandido,
-    required this.titulo,
-    required this.esDomicilio,
-    required this.cobrarDomicilio,
-    required this.valorDomicilio,
-    required this.items,
-    required this.onEditar,
-    required this.onEliminar,
-  });
-
-  @override
-  State<_FacturaPanel> createState() => _FacturaPanelState();
-}
-
-class _FacturaPanelState extends State<_FacturaPanel> {
-  int? _detalleExpandidoId;
-
-  double get _subtotal => widget.items.fold(0, (s, i) => s + i.subtotal);
-  double get _domicilio =>
-      widget.esDomicilio && widget.cobrarDomicilio ? widget.valorDomicilio : 0;
-  double get _total => _subtotal + _domicilio;
-
-  void _alternarDetalle(ItemPedido item) {
-    setState(() {
-      _detalleExpandidoId = _detalleExpandidoId == item.id ? null : item.id;
-    });
-  }
-
-  Widget _buildItemCard(ItemPedido item) {
-    final etiquetas = item.adicionales;
-    final expandido = _detalleExpandidoId == item.id;
-
-    return Card(
-      elevation: 0,
+    return Material(
       color: AppColors.surface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      clipBehavior: Clip.antiAlias,
+      borderRadius: BorderRadius.circular(14),
       child: InkWell(
-        onTap: () => _alternarDetalle(item),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          item.nombreProducto,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w700,
-                            color: AppColors.textPrimary,
-                          ),
-                        ),
-                        Text(
-                          '${item.cantidad} x ${_formatMoney(item.precio)}',
-                          style: const TextStyle(color: AppColors.textMuted),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Text(
-                        _formatMoney(item.subtotal),
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.primary,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Icon(
-                        expandido ? Icons.expand_less : Icons.expand_more,
-                        color: AppColors.textMuted,
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            AnimatedCrossFade(
-              firstChild: const SizedBox.shrink(),
-              secondChild: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        borderRadius: BorderRadius.circular(14),
+        onTap: onPersonalizar,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(
+            children: [
+              Expanded(
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    if (etiquetas.isNotEmpty)
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: Wrap(
-                          spacing: 6,
-                          runSpacing: 6,
-                          children: etiquetas
-                              .map(
-                                (etiqueta) => Chip(
-                                  label: Text(etiqueta),
-                                  visualDensity: VisualDensity.compact,
-                                  materialTapTargetSize:
-                                      MaterialTapTargetSize.shrinkWrap,
-                                ),
-                              )
-                              .toList(),
-                        ),
+                    Text(
+                      producto.nombre,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textPrimary,
                       ),
-                    if (etiquetas.isNotEmpty) const SizedBox(height: 10),
-                    if (item.nota.trim().isNotEmpty)
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: AppColors.primary.withValues(alpha: 0.06),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Text(
-                          'Nota: ${item.nota}',
-                          style: const TextStyle(
-                            color: AppColors.textPrimary,
-                          ),
-                        ),
+                    ),
+                    if (producto.descripcion.isNotEmpty)
+                      Text(
+                        producto.descripcion,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12, color: AppColors.textMuted),
                       ),
-                    if (item.nota.trim().isNotEmpty) const SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Text(
-                          'Cantidad: ${item.cantidad}',
-                          style: const TextStyle(fontWeight: FontWeight.w600),
-                        ),
-                        const Spacer(),
-                        TextButton.icon(
-                          onPressed: () => widget.onEditar(item),
-                          icon: const Icon(Icons.edit_outlined),
-                          label: const Text('Editar'),
-                        ),
-                        const SizedBox(width: 8),
-                        TextButton.icon(
-                          onPressed: () => widget.onEliminar(item),
-                          icon: const Icon(
-                            Icons.delete_outline,
-                            color: AppColors.error,
-                          ),
-                          label: const Text(
-                            'Eliminar',
-                            style: TextStyle(color: AppColors.error),
-                          ),
-                        ),
-                      ],
+                    const SizedBox(height: 4),
+                    Text(
+                      _formatMoney(producto.precio),
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w700, color: AppColors.accent),
                     ),
                   ],
                 ),
               ),
-              crossFadeState: expandido
-                  ? CrossFadeState.showSecond
-                  : CrossFadeState.showFirst,
-              duration: const Duration(milliseconds: 180),
-              sizeCurve: Curves.easeInOut,
-            ),
-          ],
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _BotonRedondo(
+                    icon: Icons.remove,
+                    habilitado: cantidad > 0,
+                    color: AppColors.textMuted,
+                    onTap: onQuitarRapido,
+                  ),
+                  SizedBox(
+                    width: 26,
+                    child: Text(
+                      '$cantidad',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textPrimary,
+                      ),
+                    ),
+                  ),
+                  _BotonRedondo(
+                    icon: Icons.add,
+                    habilitado: true,
+                    color: AppColors.accent,
+                    onTap: onAgregarRapido,
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
+}
+
+class _BotonRedondo extends StatelessWidget {
+  final IconData icon;
+  final bool habilitado;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _BotonRedondo({
+    required this.icon,
+    required this.habilitado,
+    required this.color,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.accent.withValues(alpha: 0.25)),
-      ),
-      child: Column(
-        children: [
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: const BoxDecoration(
-              color: AppColors.primary,
-              borderRadius: BorderRadius.only(
-                topLeft: Radius.circular(12),
-                topRight: Radius.circular(12),
-              ),
-            ),
-            child: InkWell(
-              onTap: widget.onToggleExpandido,
-              borderRadius: BorderRadius.circular(8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Factura - ${widget.titulo}',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  Icon(
-                    widget.expandido ? Icons.expand_less : Icons.expand_more,
-                    color: Colors.white,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (!widget.expandido)
-            const SizedBox.shrink()
-          else if (widget.items.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(12),
-              child: Text(
-                'Aun no hay productos en el pedido.',
-                style: TextStyle(color: AppColors.textMuted),
-              ),
-            )
-          else
-            Expanded(
-              child: ListView.separated(
-                padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-                itemCount: widget.items.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 8),
-                itemBuilder: (_, index) => _buildItemCard(widget.items[index]),
-              ),
-            ),
-          if (widget.expandido)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      Text('Subtotal: ${_formatMoney(_subtotal)}'),
-                      const SizedBox(width: 12),
-                      if (widget.esDomicilio)
-                        Text('Domicilio: ${_formatMoney(_domicilio)}'),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                    decoration: BoxDecoration(
-                      color: AppColors.primary.withValues(alpha: 0.08),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Row(
-                      children: [
-                        const Text(
-                          'Total pedido',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w700,
-                            color: AppColors.primary,
-                          ),
-                        ),
-                        const Spacer(),
-                        Text(
-                          _formatMoney(_total),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w800,
-                            color: AppColors.primary,
-                            fontSize: 16,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-        ],
+    return Material(
+      color: habilitado ? color : AppColors.textMuted.withValues(alpha: 0.25),
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: habilitado ? onTap : null,
+        child: SizedBox(
+          width: 28,
+          height: 28,
+          child: Icon(icon, color: Colors.white, size: 16),
+        ),
       ),
     );
   }

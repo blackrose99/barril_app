@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:drift/drift.dart' show OrderingTerm, Variable;
@@ -6,9 +8,12 @@ import '../../../../core/constants/app_strings.dart';
 import '../../../../core/utils/money_formatter.dart';
 import '../../../../database/app_database.dart';
 import '../../../../injection_container.dart';
+import '../../../impresion/ticket_data.dart';
+import '../../domain/entities/item_pedido.dart';
 import 'admin_config_screen.dart';
 import 'jornada_historial_screen.dart';
 import 'pedido_screen.dart';
+import 'ticket_preview_screen.dart';
 
 String _formatMoney(num value) => formatMoney(value);
 
@@ -190,10 +195,14 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
     await _ejecutarSeguro(
       "ALTER TABLE pedidos ADD COLUMN mesero TEXT",
     );
+    await _ejecutarSeguro(
+      "ALTER TABLE pedidos ADD COLUMN numero_turno INTEGER",
+    );
 
     await _asegurarClaveConfig('valor_domicilio', '5000');
-    await _asegurarClaveConfig('printer_devices', 'POS principal');
-    await _asegurarClaveConfig('printer_default', 'POS principal');
+    await _asegurarClaveConfig('printer_device_id', '');
+    await _asegurarClaveConfig('printer_device_name', '');
+    await _asegurarClaveConfig('printer_paper_width', '32');
 
     // Convierte fechas legacy en texto a epoch ms para columnas DateTime de Drift.
     await _db.customStatement('''
@@ -242,15 +251,6 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
         .toList();
   }
 
-  Future<List<String>> _impresorasConfiguradas() async {
-    final raw = await _leerConfig('printer_devices', fallback: 'POS principal');
-    return raw
-        .split(',')
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty)
-        .toList();
-  }
-
   Future<void> _ejecutarSeguro(String sql) async {
     try {
       await _db.customStatement(sql);
@@ -265,7 +265,8 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
   }) async {
     final rows = await _db.customSelect(
       '''
-      SELECT id, tipo, estado, referencia, cliente, mesero
+      SELECT id, tipo, estado, referencia, cliente, mesero, valor_domicilio,
+             COALESCE(numero_turno, 0) AS numero_turno
       FROM pedidos
       WHERE jornada_id = ? AND estado = ?
       ORDER BY id DESC
@@ -297,6 +298,8 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
         mesero: ((data['mesero'] as String?) ?? '').trim(),
         itemsCount: (statData['items_count'] as int?) ?? 0,
         subtotal: (statData['subtotal'] as num?)?.toDouble() ?? 0,
+        valorDomicilio: (data['valor_domicilio'] as num?)?.toDouble() ?? 0,
+        numeroTurno: (data['numero_turno'] as int?) ?? 0,
       ));
     }
     return pedidos;
@@ -480,7 +483,7 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
                 ),
                 const SizedBox(height: 10),
                 DropdownButtonFormField<String>(
-                  initialValue: meseroSeleccionado,
+                  value: meseroSeleccionado,
                   decoration: InputDecoration(
                     labelText: 'Mesero (opcional)',
                     helperText: meseros.isEmpty
@@ -527,10 +530,16 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
         5000.0;
     final valorDomicilio = tipo == 'domicilio' ? valorDomicilioConfig : 0.0;
 
+    final maxTurnoRow = await _db.customSelect(
+      'SELECT COALESCE(MAX(numero_turno), 0) AS max_turno FROM pedidos WHERE jornada_id = ?',
+      variables: [Variable<int>(jornada.id)],
+    ).getSingle();
+    final numeroTurno = ((maxTurnoRow.data['max_turno'] as int?) ?? 0) + 1;
+
     await _db.customStatement(
       '''
-      INSERT INTO pedidos (mesa_id, tipo, valor_domicilio, estado, creado_en, jornada_id, referencia, cliente, mesero)
-      VALUES (NULL, ?, ?, 'abierto', ?, ?, ?, ?, ?)
+      INSERT INTO pedidos (mesa_id, tipo, valor_domicilio, estado, creado_en, jornada_id, referencia, cliente, mesero, numero_turno)
+      VALUES (NULL, ?, ?, 'abierto', ?, ?, ?, ?, ?, ?)
       ''',
       [
         tipo,
@@ -540,10 +549,16 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
         referenciaCtrl.text.trim(),
         clienteCtrl.text.trim(),
         meseroSeleccionado.trim(),
+        numeroTurno,
       ],
     );
 
     await _cargarDatos();
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Pedido creado: ${codigoTurnoDesde(numeroTurno)}')),
+    );
   }
 
   Future<void> _editarPedidoAbierto(_PedidoResumen pedido) async {
@@ -587,7 +602,7 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
                 ),
                 const SizedBox(height: 10),
                 DropdownButtonFormField<String>(
-                  initialValue: meseroSeleccionado,
+                  value: meseroSeleccionado,
                   decoration: InputDecoration(
                     labelText: 'Mesero (opcional)',
                     helperText: meseros.isEmpty
@@ -669,80 +684,99 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
     await _cargarDatos();
   }
 
-  Future<void> _cerrarPedidoConImpresion(_PedidoResumen pedido) async {
-    final impresoras = await _impresorasConfiguradas();
-    if (!mounted) return;
+  Future<TicketData> _construirTicketData(
+    _PedidoResumen pedido, {
+    required String estado,
+  }) async {
+    final itemsRows = await (_db.select(_db.itemsPedido)
+          ..where((i) => i.pedidoId.equals(pedido.id)))
+        .get();
 
-    if (impresoras.isEmpty) {
+    final items = itemsRows
+        .map(
+          (row) => ItemPedido(
+            id: row.id,
+            pedidoId: row.pedidoId,
+            productoId: row.productoId,
+            nombreProducto: row.nombreProducto,
+            precio: row.precio,
+            cantidad: row.cantidad,
+            adicionales: () {
+              try {
+                final decoded = jsonDecode(row.adicionales);
+                if (decoded is List) return decoded.map((e) => e.toString()).toList();
+              } catch (_) {}
+              return <String>[];
+            }(),
+            nota: row.nota,
+          ),
+        )
+        .toList();
+
+    final nombreNegocio = await _leerConfig('nombre_negocio', fallback: 'POSify');
+
+    return TicketData(
+      nombreNegocio: nombreNegocio,
+      pedidoId: pedido.id,
+      numeroTurno: pedido.numeroTurno,
+      tipo: pedido.tipo,
+      referencia: pedido.referencia,
+      cliente: pedido.cliente,
+      mesero: pedido.mesero,
+      items: items,
+      valorDomicilio: pedido.valorDomicilio,
+      cobrarDomicilio: pedido.valorDomicilio > 0,
+      estadoPedido: estado,
+      fecha: DateTime.now(),
+    );
+  }
+
+  Future<void> _verTicket(_PedidoResumen pedido) async {
+    final data = await _construirTicketData(pedido, estado: pedido.estado);
+    if (!mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => TicketPreviewScreen(data: data)),
+    );
+  }
+
+  Future<void> _cerrarPedidoConImpresion(_PedidoResumen pedido) async {
+    if (pedido.itemsCount == 0) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content:
-              Text('No hay impresoras configuradas. Configuralas primero.'),
-        ),
+        const SnackBar(content: Text('Agrega productos antes de cerrar.')),
       );
       return;
     }
 
-    final impresoraDefault =
-        await _leerConfig('printer_default', fallback: impresoras.first);
-    String impresoraSeleccionada = impresoras.contains(impresoraDefault)
-        ? impresoraDefault
-        : impresoras.first;
-
-    if (!mounted) return;
-
     final confirmar = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setLocalState) => AlertDialog(
-          title: const Text('Cerrar pedido e imprimir POS'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Selecciona la impresora para imprimir el POS:'),
-              const SizedBox(height: 10),
-              DropdownButtonFormField<String>(
-                initialValue: impresoraSeleccionada,
-                items: impresoras
-                    .map((p) => DropdownMenuItem(value: p, child: Text(p)))
-                    .toList(),
-                onChanged: (value) {
-                  if (value == null) return;
-                  setLocalState(() => impresoraSeleccionada = value);
-                },
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Cancelar'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Cerrar e imprimir'),
-            ),
-          ],
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Cerrar pedido'),
+        content: const Text(
+          'Se generará la factura final con el código de turno. ¿Deseas continuar?',
         ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Cerrar pedido'),
+          ),
+        ],
       ),
     );
 
     if (confirmar != true) return;
 
-    await _db.customStatement(
-      "UPDATE configuracion SET valor = ? WHERE clave = 'printer_default'",
-      [impresoraSeleccionada],
-    );
-
     await _actualizarEstadoPedido(pedido.id, 'cerrado');
+    final data = await _construirTicketData(pedido, estado: 'cerrado');
 
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-            'Pedido #${pedido.id} cerrado. POS enviado a $impresoraSeleccionada.'),
-      ),
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => TicketPreviewScreen(data: data)),
     );
   }
 
@@ -878,7 +912,7 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           DropdownButtonFormField<int>(
-                            initialValue: _jornadaSeleccionada?.id,
+                            value: _jornadaSeleccionada?.id,
                             decoration: const InputDecoration(
                               labelText: 'Jornada',
                             ),
@@ -980,6 +1014,13 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
                                             children: [
                                               Row(
                                                 children: [
+                                                  if (pedido.numeroTurno > 0) ...[
+                                                    _TurnoBadge(
+                                                      numeroTurno:
+                                                          pedido.numeroTurno,
+                                                    ),
+                                                    const SizedBox(width: 8),
+                                                  ],
                                                   Text(
                                                     'Pedido #${pedido.id}',
                                                     style: const TextStyle(
@@ -1032,6 +1073,15 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
                                                       child: const Text(
                                                           'Editar datos'),
                                                     ),
+                                                    OutlinedButton.icon(
+                                                      onPressed: () =>
+                                                          _verTicket(pedido),
+                                                      icon: const Icon(
+                                                          Icons.receipt_long,
+                                                          size: 18),
+                                                      label: const Text(
+                                                          'Ver ticket'),
+                                                    ),
                                                     OutlinedButton(
                                                       onPressed: () =>
                                                           Navigator.push(
@@ -1071,6 +1121,18 @@ class _MesasScreenState extends ConsumerState<MesasScreen> {
                                                           'Cancelar'),
                                                     ),
                                                   ],
+                                                ),
+                                              ] else if (pedido.estado ==
+                                                  'cerrado') ...[
+                                                const SizedBox(height: 10),
+                                                OutlinedButton.icon(
+                                                  onPressed: () =>
+                                                      _verTicket(pedido),
+                                                  icon: const Icon(
+                                                      Icons.receipt_long,
+                                                      size: 18),
+                                                  label: const Text(
+                                                      'Ver / reimprimir ticket'),
                                                 ),
                                               ],
                                             ],
@@ -1413,6 +1475,8 @@ class _PedidoResumen {
   final String mesero;
   final int itemsCount;
   final double subtotal;
+  final double valorDomicilio;
+  final int numeroTurno;
 
   const _PedidoResumen({
     required this.id,
@@ -1423,6 +1487,8 @@ class _PedidoResumen {
     required this.mesero,
     required this.itemsCount,
     required this.subtotal,
+    this.valorDomicilio = 0,
+    this.numeroTurno = 0,
   });
 }
 
@@ -1470,6 +1536,32 @@ class _ResumenMeta extends StatelessWidget {
       child: Text(
         label,
         style: TextStyle(color: color, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+}
+
+class _TurnoBadge extends StatelessWidget {
+  final int numeroTurno;
+
+  const _TurnoBadge({required this.numeroTurno});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.primary,
+        borderRadius: BorderRadius.circular(100),
+      ),
+      child: Text(
+        codigoTurnoDesde(numeroTurno),
+        style: const TextStyle(
+          fontSize: 12,
+          color: Colors.white,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.4,
+        ),
       ),
     );
   }

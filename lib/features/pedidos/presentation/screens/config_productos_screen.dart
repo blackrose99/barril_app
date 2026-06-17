@@ -73,7 +73,7 @@ class _ConfigProductosScreenState extends State<ConfigProductosScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 DropdownButtonFormField<int>(
-                  initialValue: categoriaId,
+                  value: categoriaId,
                   decoration: const InputDecoration(labelText: 'Categoria'),
                   items: _categorias
                       .map((c) =>
@@ -152,7 +152,7 @@ class _ConfigProductosScreenState extends State<ConfigProductosScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 DropdownButtonFormField<int>(
-                  initialValue: categoriaId,
+                  value: categoriaId,
                   decoration: const InputDecoration(labelText: 'Categoria'),
                   items: _categorias
                       .map((c) =>

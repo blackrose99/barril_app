@@ -2,7 +2,6 @@ import 'dart:io';
 import 'dart:convert';
 
 import 'package:csv/csv.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:intl/intl.dart';
@@ -15,6 +14,10 @@ import '../../../../core/constants/app_colors.dart';
 import '../../../../core/utils/money_formatter.dart';
 import '../../../../database/app_database.dart';
 import '../../../../injection_container.dart';
+import '../../../impresion/bluetooth_printer_service.dart';
+import '../../../impresion/ticket_data.dart';
+import '../../domain/entities/item_pedido.dart';
+import 'ticket_preview_screen.dart';
 
 String _formatMoney(num value) => formatMoney(value);
 
@@ -48,63 +51,22 @@ class _JornadaHistorialScreenState extends State<JornadaHistorialScreen> {
     return row?.valor ?? fallback;
   }
 
-  bool _mismoNombreImpresora(String a, String b) {
-    return a.trim().toLowerCase() == b.trim().toLowerCase();
-  }
+  final BluetoothPrinterService _printerService = const BluetoothPrinterService();
 
   Future<bool> _imprimirDirectoBluetooth(String contenido) async {
-    try {
-      final configurada = await _leerConfig('printer_default');
-      if (configurada.trim().isEmpty) return false;
+    final deviceId = await _leerConfig('printer_device_id');
+    if (deviceId.trim().isEmpty) return false;
 
-      final conectados = FlutterBluePlus.connectedDevices;
-      if (conectados.isEmpty) return false;
+    final device = await _printerService.connect(deviceId);
+    if (device == null) return false;
 
-      BluetoothDevice? objetivo;
-      for (final d in conectados) {
-        if (_mismoNombreImpresora(d.platformName, configurada)) {
-          objetivo = d;
-          break;
-        }
-      }
-      if (objetivo == null) return false;
-
-      final servicios = await objetivo.discoverServices();
-
-      BluetoothCharacteristic? writable;
-      for (final s in servicios) {
-        for (final c in s.characteristics) {
-          if (c.properties.write || c.properties.writeWithoutResponse) {
-            writable = c;
-            break;
-          }
-        }
-        if (writable != null) break;
-      }
-
-      if (writable == null) return false;
-
-      final bytes = <int>[
-        ...utf8.encode('$contenido\n\n'),
-        0x1D,
-        0x56,
-        0x00,
-      ];
-
-      const int maxChunk = 180;
-      for (int i = 0; i < bytes.length; i += maxChunk) {
-        final end = (i + maxChunk < bytes.length) ? i + maxChunk : bytes.length;
-        final chunk = bytes.sublist(i, end);
-        await writable.write(
-          chunk,
-          withoutResponse: writable.properties.writeWithoutResponse,
-        );
-      }
-
-      return true;
-    } catch (_) {
-      return false;
-    }
+    final bytes = <int>[
+      ...utf8.encode('$contenido\n\n'),
+      0x1D,
+      0x56,
+      0x00,
+    ];
+    return _printerService.printBytes(device, bytes);
   }
 
   @override
@@ -118,7 +80,8 @@ class _JornadaHistorialScreenState extends State<JornadaHistorialScreen> {
 
     final pedidosRows = await _db.customSelect(
       '''
-      SELECT id, tipo, estado, referencia, cliente, mesero, valor_domicilio
+      SELECT id, tipo, estado, referencia, cliente, mesero, valor_domicilio,
+             COALESCE(numero_turno, 0) AS numero_turno
       FROM pedidos
       WHERE jornada_id = ?
       ORDER BY id DESC
@@ -158,6 +121,7 @@ class _JornadaHistorialScreenState extends State<JornadaHistorialScreen> {
           subtotal: subtotal,
           domicilio: domicilio,
           total: total,
+          numeroTurno: (data['numero_turno'] as int?) ?? 0,
         ),
       );
     }
@@ -187,6 +151,56 @@ class _JornadaHistorialScreenState extends State<JornadaHistorialScreen> {
       );
       _loading = false;
     });
+  }
+
+  Future<void> _verTicket(_PedidoHistorial pedido) async {
+    final itemsRows = await (_db.select(_db.itemsPedido)
+          ..where((i) => i.pedidoId.equals(pedido.id)))
+        .get();
+
+    final items = itemsRows
+        .map(
+          (row) => ItemPedido(
+            id: row.id,
+            pedidoId: row.pedidoId,
+            productoId: row.productoId,
+            nombreProducto: row.nombreProducto,
+            precio: row.precio,
+            cantidad: row.cantidad,
+            adicionales: () {
+              try {
+                final decoded = jsonDecode(row.adicionales);
+                if (decoded is List) return decoded.map((e) => e.toString()).toList();
+              } catch (_) {}
+              return <String>[];
+            }(),
+            nota: row.nota,
+          ),
+        )
+        .toList();
+
+    final nombreNegocio = await _leerConfig('nombre_negocio', fallback: 'POSify');
+
+    final data = TicketData(
+      nombreNegocio: nombreNegocio,
+      pedidoId: pedido.id,
+      numeroTurno: pedido.numeroTurno,
+      tipo: pedido.tipo,
+      referencia: pedido.referencia,
+      cliente: pedido.cliente,
+      mesero: pedido.mesero,
+      items: items,
+      valorDomicilio: pedido.domicilio,
+      cobrarDomicilio: pedido.domicilio > 0,
+      estadoPedido: pedido.estado,
+      fecha: DateTime.now(),
+    );
+
+    if (!mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => TicketPreviewScreen(data: data)),
+    );
   }
 
   Future<String> _construirInformePosTexto() async {
@@ -591,6 +605,26 @@ class _JornadaHistorialScreenState extends State<JornadaHistorialScreen> {
                                   children: [
                                     Row(
                                       children: [
+                                        if (p.numeroTurno > 0) ...[
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 8, vertical: 3),
+                                            decoration: BoxDecoration(
+                                              color: AppColors.primary,
+                                              borderRadius:
+                                                  BorderRadius.circular(100),
+                                            ),
+                                            child: Text(
+                                              codigoTurnoDesde(p.numeroTurno),
+                                              style: const TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.w800,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                        ],
                                         Text('Pedido #${p.id}',
                                             style: const TextStyle(
                                                 fontWeight: FontWeight.w700)),
@@ -636,6 +670,19 @@ class _JornadaHistorialScreenState extends State<JornadaHistorialScreen> {
                                           color: AppColors.error,
                                           fontSize: 12,
                                           fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                    if (p.estado != 'abierto') ...[
+                                      const SizedBox(height: 8),
+                                      Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: OutlinedButton.icon(
+                                          onPressed: () => _verTicket(p),
+                                          icon: const Icon(Icons.receipt_long,
+                                              size: 18),
+                                          label: const Text(
+                                              'Ver / reimprimir ticket'),
                                         ),
                                       ),
                                     ],
@@ -686,6 +733,7 @@ class _PedidoHistorial {
   final double subtotal;
   final double domicilio;
   final double total;
+  final int numeroTurno;
 
   const _PedidoHistorial({
     required this.id,
@@ -696,6 +744,7 @@ class _PedidoHistorial {
     required this.mesero,
     required this.itemsCount,
     required this.subtotal,
+    this.numeroTurno = 0,
     required this.domicilio,
     required this.total,
   });

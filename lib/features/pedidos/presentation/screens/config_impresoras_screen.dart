@@ -1,9 +1,13 @@
 import 'package:drift/drift.dart' as drift;
 import 'package:flutter/material.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import '../../../../core/constants/app_colors.dart';
 import '../../../../database/app_database.dart';
 import '../../../../injection_container.dart';
+import '../../../impresion/bluetooth_printer_service.dart';
+import '../../../impresion/ticket_builder.dart';
+import '../../../impresion/ticket_data.dart';
 
 class ConfigImpresorasScreen extends StatefulWidget {
   const ConfigImpresorasScreen({super.key});
@@ -14,10 +18,15 @@ class ConfigImpresorasScreen extends StatefulWidget {
 
 class _ConfigImpresorasScreenState extends State<ConfigImpresorasScreen> {
   final AppDatabase _db = sl<AppDatabase>();
+  final BluetoothPrinterService _printerService = const BluetoothPrinterService();
 
   bool _loading = true;
-  List<String> _impresoras = const [];
-  String _predeterminada = '';
+  bool _escaneando = false;
+  bool _imprimiendoPrueba = false;
+  String _printerDeviceId = '';
+  String _printerDeviceName = '';
+  AnchoPapel _anchoPapel = AnchoPapel.mm58;
+  List<ScanResult> _encontrados = const [];
 
   @override
   void initState() {
@@ -35,104 +44,131 @@ class _ConfigImpresorasScreenState extends State<ConfigImpresorasScreen> {
           .insert(ConfiguracionCompanion.insert(clave: clave, valor: valor));
       return;
     }
-
     await (_db.update(_db.configuracion)..where((c) => c.clave.equals(clave)))
         .write(ConfiguracionCompanion(valor: drift.Value(valor)));
+  }
+
+  Future<String> _leerConfig(String clave, {String fallback = ''}) async {
+    final row = await (_db.select(_db.configuracion)
+          ..where((c) => c.clave.equals(clave)))
+        .getSingleOrNull();
+    return row?.valor ?? fallback;
   }
 
   Future<void> _cargar() async {
     setState(() => _loading = true);
 
-    await _upsertConfig('printer_devices', 'POS principal');
-    await _upsertConfig('printer_default', 'POS principal');
-
-    final devices = await (_db.select(_db.configuracion)
-          ..where((c) => c.clave.equals('printer_devices')))
-        .getSingle();
-    final printerDefault = await (_db.select(_db.configuracion)
-          ..where((c) => c.clave.equals('printer_default')))
-        .getSingle();
+    final deviceId = await _leerConfig('printer_device_id');
+    final deviceName = await _leerConfig('printer_device_name');
+    final anchoRaw = await _leerConfig('printer_paper_width', fallback: '32');
+    final ancho = AnchoPapelX.desdeCaracteres(int.tryParse(anchoRaw) ?? 32);
 
     if (!mounted) return;
     setState(() {
-      _impresoras = devices.valor
-          .split(',')
-          .map((e) => e.trim())
-          .where((e) => e.isNotEmpty)
-          .toList();
-      _predeterminada = printerDefault.valor;
+      _printerDeviceId = deviceId;
+      _printerDeviceName = deviceName;
+      _anchoPapel = ancho;
       _loading = false;
     });
   }
 
-  Future<void> _agregar() async {
-    final ctrl = TextEditingController();
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Nueva impresora POS'),
-        content: TextField(
-          controller: ctrl,
-          decoration: const InputDecoration(labelText: 'Nombre de impresora'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancelar'),
+  Future<void> _buscarImpresoras() async {
+    setState(() {
+      _escaneando = true;
+      _encontrados = const [];
+    });
+
+    try {
+      final resultados = await _printerService.scanPrinters();
+      if (!mounted) return;
+      setState(() => _encontrados = resultados
+          .where((r) => r.device.platformName.isNotEmpty || r.advertisementData.advName.isNotEmpty)
+          .toList());
+
+      if (_encontrados.isEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'No se encontraron dispositivos Bluetooth cercanos. Asegúrate de que la impresora esté encendida y en modo visible.',
+            ),
           ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Agregar'),
-          ),
-        ],
-      ),
-    );
-
-    if (ok != true) return;
-    final nombre = ctrl.text.trim();
-    if (nombre.isEmpty) return;
-
-    final lista = [..._impresoras];
-    if (!lista.contains(nombre)) lista.add(nombre);
-
-    await _upsertConfig('printer_devices', lista.join(','));
-    if (_predeterminada.isEmpty) {
-      await _upsertConfig('printer_default', nombre);
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _escaneando = false);
     }
+  }
 
+  Future<void> _seleccionarImpresora(ScanResult resultado) async {
+    final id = resultado.device.remoteId.str;
+    final nombre = resultado.device.platformName.isNotEmpty
+        ? resultado.device.platformName
+        : resultado.advertisementData.advName;
+
+    await _upsertConfig('printer_device_id', id);
+    await _upsertConfig('printer_device_name', nombre.isEmpty ? id : nombre);
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Impresora "$nombre" guardada como predeterminada.')),
+    );
     await _cargar();
   }
 
-  Future<void> _eliminar(String impresora) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Eliminar impresora'),
-        content: Text('Deseas eliminar $impresora?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancelar'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.error),
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Eliminar'),
-          ),
-        ],
-      ),
-    );
-
-    if (ok != true) return;
-
-    final lista = [..._impresoras]..remove(impresora);
-    final nuevoDefault = lista.isNotEmpty ? lista.first : 'POS principal';
-
-    await _upsertConfig('printer_devices', lista.join(','));
-    await _upsertConfig('printer_default',
-        _predeterminada == impresora ? nuevoDefault : _predeterminada);
-
+  Future<void> _olvidarImpresora() async {
+    await _upsertConfig('printer_device_id', '');
+    await _upsertConfig('printer_device_name', '');
     await _cargar();
+  }
+
+  Future<void> _cambiarAnchoPapel(AnchoPapel ancho) async {
+    await _upsertConfig('printer_paper_width', ancho.caracteresPorLinea.toString());
+    setState(() => _anchoPapel = ancho);
+  }
+
+  Future<void> _imprimirTicketPrueba() async {
+    if (_printerDeviceId.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Primero conecta una impresora.')),
+      );
+      return;
+    }
+
+    setState(() => _imprimiendoPrueba = true);
+    try {
+      final nombreNegocio = await _leerConfig('nombre_negocio', fallback: 'POSify');
+      final ticketPrueba = TicketData(
+        nombreNegocio: nombreNegocio,
+        pedidoId: 0,
+        numeroTurno: 1,
+        tipo: 'mesa',
+        referencia: 'Mesa de prueba',
+        cliente: '',
+        mesero: '',
+        items: const [],
+        valorDomicilio: 0,
+        cobrarDomicilio: false,
+        estadoPedido: 'cerrado',
+        fecha: DateTime.now(),
+      );
+
+      final bytes = await buildEscPosBytes(ticketPrueba, ancho: _anchoPapel);
+      final device = await _printerService.connect(_printerDeviceId);
+      final exito = device != null && await _printerService.printBytes(device, bytes);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            exito
+                ? 'Ticket de prueba enviado a $_printerDeviceName.'
+                : 'No se pudo conectar a la impresora. Verifica que esté encendida y vinculada.',
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _imprimiendoPrueba = false);
+    }
   }
 
   @override
@@ -142,54 +178,140 @@ class _ConfigImpresorasScreenState extends State<ConfigImpresorasScreen> {
       appBar: AppBar(
         backgroundColor: AppColors.primary,
         iconTheme: const IconThemeData(color: Colors.white),
-        title: const Text(
-          'Impresoras POS',
-          style: TextStyle(color: Colors.white),
-        ),
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _agregar,
-        icon: const Icon(Icons.add),
-        label: const Text('Agregar'),
+        title: const Text('Impresoras POS', style: TextStyle(color: Colors.white)),
       ),
       body: _loading
-          ? const Center(
-              child: CircularProgressIndicator(color: AppColors.accent))
-          : _impresoras.isEmpty
-              ? const Center(child: Text('No hay impresoras configuradas.'))
-              : ListView(
-                  padding: const EdgeInsets.all(16),
-                  children: [
-                    DropdownButtonFormField<String>(
-                      initialValue: _impresoras.contains(_predeterminada)
-                          ? _predeterminada
-                          : _impresoras.first,
-                      decoration: const InputDecoration(
-                        labelText: 'Impresora predeterminada',
+          ? const Center(child: CircularProgressIndicator(color: AppColors.accent))
+          : ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Impresora térmica predeterminada',
+                        style: TextStyle(fontWeight: FontWeight.w700),
                       ),
-                      items: _impresoras
-                          .map(
-                              (p) => DropdownMenuItem(value: p, child: Text(p)))
-                          .toList(),
-                      onChanged: (value) async {
-                        if (value == null) return;
-                        await _upsertConfig('printer_default', value);
-                        await _cargar();
-                      },
-                    ),
-                    const SizedBox(height: 12),
-                    ..._impresoras.map(
-                      (p) => ListTile(
-                        title: Text(p),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete_outline,
-                              color: AppColors.error),
-                          onPressed: () => _eliminar(p),
+                      const SizedBox(height: 8),
+                      if (_printerDeviceId.trim().isEmpty)
+                        const Text(
+                          'No hay ninguna impresora conectada todavía.',
+                          style: TextStyle(color: AppColors.textMuted),
+                        )
+                      else
+                        Row(
+                          children: [
+                            const Icon(Icons.print, color: AppColors.accent),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                _printerDeviceName.isEmpty ? _printerDeviceId : _printerDeviceName,
+                                style: const TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: _olvidarImpresora,
+                              child: const Text('Olvidar'),
+                            ),
+                          ],
                         ),
+                      const SizedBox(height: 12),
+                      FilledButton.icon(
+                        onPressed: _imprimiendoPrueba ? null : _imprimirTicketPrueba,
+                        icon: _imprimiendoPrueba
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                              )
+                            : const Icon(Icons.receipt_long),
+                        label: const Text('Imprimir ticket de prueba'),
                       ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Ancho de papel', style: TextStyle(fontWeight: FontWeight.w700)),
+                      const SizedBox(height: 8),
+                      SegmentedButton<AnchoPapel>(
+                        segments: AnchoPapel.values
+                            .map((a) => ButtonSegment(value: a, label: Text(a.etiqueta)))
+                            .toList(),
+                        selected: {_anchoPapel},
+                        onSelectionChanged: (s) => _cambiarAnchoPapel(s.first),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Dispositivos Bluetooth cercanos',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    FilledButton.icon(
+                      onPressed: _escaneando ? null : _buscarImpresoras,
+                      icon: _escaneando
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                            )
+                          : const Icon(Icons.bluetooth_searching),
+                      label: Text(_escaneando ? 'Buscando...' : 'Buscar'),
                     ),
                   ],
                 ),
+                const SizedBox(height: 8),
+                if (_encontrados.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16),
+                    child: Text(
+                      'Toca "Buscar" para detectar impresoras Bluetooth disponibles.',
+                      style: TextStyle(color: AppColors.textMuted),
+                    ),
+                  )
+                else
+                  ..._encontrados.map((r) {
+                    final nombre = r.device.platformName.isNotEmpty
+                        ? r.device.platformName
+                        : (r.advertisementData.advName.isEmpty
+                            ? r.device.remoteId.str
+                            : r.advertisementData.advName);
+                    final esActual = r.device.remoteId.str == _printerDeviceId;
+                    return Card(
+                      color: esActual ? AppColors.accent.withValues(alpha: 0.12) : Colors.white,
+                      child: ListTile(
+                        leading: const Icon(Icons.print_outlined),
+                        title: Text(nombre),
+                        subtitle: Text('Señal: ${r.rssi} dBm'),
+                        trailing: esActual
+                            ? const Icon(Icons.check_circle, color: AppColors.accent)
+                            : const Icon(Icons.chevron_right),
+                        onTap: () => _seleccionarImpresora(r),
+                      ),
+                    );
+                  }),
+              ],
+            ),
     );
   }
 }
